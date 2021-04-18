@@ -1,0 +1,479 @@
+--create database
+CREATE DATABASE game TEMPLATE template0;
+
+--create game_manager
+create role game_manager
+superuser;
+alter role game_manager login;
+
+--create tables
+create table words(
+	word varchar(30)[10] primary key
+);
+create table bycotted_countries(
+	country_name varchar(50) primary key,
+	reason text
+);
+create table matches(
+	first_player_id int,
+	second_player_id int,
+	first_player_words varchar(30)[10],
+	second_player_words varchar(30)[10],
+	primary key(first_player_id, second_player_id)
+);
+create table matches_history(
+	first_player_id int,
+	second_player_id int,
+	match_date timestamp,
+	first_player_score int,
+	second_player_score int,
+	primary key(first_player_id, second_player_id, match_date)
+);
+create table players(
+	player_id serial primary key,
+	first_name varchar(30),
+	last_name varchar(30),
+	continent varchar(50),
+	country varchar(50),
+	city varchar(50),
+	phone varchar(11),
+	score int default 0,
+	role_name varchar(20)
+);
+
+--procedures
+create or replace procedure words_init()
+language plpgsql as $BODY$ begin
+insert into words(word[1]) values('room');
+insert into words(word[2]) values('class');
+insert into words(word[3]) values('student');
+insert into words(word[4]) values('professor');
+insert into words(word[5]) values('university');
+insert into words(word[6]) values('department');
+insert into words(word[7]) values('major');
+insert into words(word[8]) values('course');
+insert into words(word[9]) values('grade');
+insert into words(word[10]) values('average');
+end;
+$BODY$
+
+create or replace procedure bycotted_countries_init()
+language plpgsql as $BODY$ begin
+insert into bycotted_countries values('Iran', 'global bycotted');
+insert into bycotted_countries values('North Corea', 'global bycotted');
+end;
+$BODY$
+
+
+
+create or replace procedure reset_matches()
+language plpgsql as $BODY$
+begin
+delete from matches;
+insert into matches(first_player_id, second_player_id) values(0,0);
+revoke insert on matches from public;
+grant update(first_player_id, second_player_id)
+on matches
+to public;
+revoke update(first_player_words,second_player_words) on matches from public;
+grant select
+on matches
+to public;
+end;
+$BODY$;
+
+create or replace procedure grant_update_to_user1(user_role_name name)
+language plpgsql as $BODY$
+begin
+execute 'grant update(first_player_words) ON matches to "'||user_role_name||'"';
+revoke update(first_player_id) on matches from public;
+end;
+$BODY$
+security definer;
+create or replace procedure grant_update_to_user2(user_role_name name)
+language plpgsql as $BODY$
+begin
+execute 'grant update(second_player_words) ON matches to "'||user_role_name||'"';
+revoke update(second_player_id) on matches from public;
+end;
+$BODY$
+security definer;
+
+create or replace procedure revoke_update_from_user1(user_role_name name)
+language plpgsql as $BODY$
+begin
+execute 'revoke update(first_player_words) ON matches from "'||user_role_name||'"';
+end;
+$BODY$
+security definer;
+create or replace procedure revoke_update_from_user2(user_role_name name)
+language plpgsql as $BODY$
+begin
+execute 'revoke update(second_player_words) ON matches from "'||user_role_name||'"';
+end;
+$BODY$
+security definer;
+--create views
+CREATE VIEW rankings AS
+    SELECT RANK() over(order by score) as rank, player_id,first_name,last_name,score
+    FROM players;
+grant select
+on rankings
+to public;
+
+--create functions
+CREATE OR REPLACE FUNCTION public.get_rankings_based_on_location()
+RETURNS TABLE(ranking bigint, continent varchar(50), country varchar(50), city varchar(50), score bigint)
+LANGUAGE 'plpgsql'
+AS $BODY$
+begin
+return query
+SELECT
+RANK() over(order by SUM (players.score)),
+case grouping(players.continent)
+when 0 then players.continent
+when 1 then 'All continents'
+end as continent,
+case grouping(players.country)
+when 0 then players.country
+when 1 then 'All countries'
+end as country,
+case grouping(players.city)
+when 0 then players.city
+when 1 then 'All cities'
+end as city,
+SUM (players.score) as total_score
+from
+players
+GROUP BY
+rollup (players.continent, players.country, players.city);
+end;
+$BODY$
+security definer;
+
+CREATE OR REPLACE FUNCTION public.get_matches_based_on_time()
+RETURNS int
+LANGUAGE 'plpgsql'
+AS $BODY$
+begin
+SELECT
+EXTRACT (year FROM match_date) as years, EXTRACT (month FROM match_date) as months, EXTRACT (day FROM match_date) as days  
+FROM
+matches_history 
+GROUP BY
+ROLLUP (years, months, days)
+ORDER BY years,months,days;
+end;
+$BODY$;
+
+CREATE OR REPLACE FUNCTION public.top3()
+RETURNS TABLE(player_id int, first_name varchar(30), last_name varchar(30), score int)
+LANGUAGE 'plpgsql'
+AS $BODY$
+ begin
+ return query
+ select
+ players.player_id, players.first_name, players.last_name, players.score
+ from players
+ order by players.score desc
+ limit 3;
+ end;
+ $BODY$;
+
+CREATE OR REPLACE FUNCTION public.one_hundred_club_countries()
+RETURNS TABLE(ranking bigint, country varchar(50), total_score bigint)
+LANGUAGE 'plpgsql'
+AS $BODY$
+begin
+return query
+SELECT
+RANK() over(
+	order by SUM (players.score)
+),
+players.country,
+sum(players.score)
+from players
+group by players.country
+having total_score>100;
+end;
+$BODY$
+security definer;
+
+
+CREATE OR REPLACE FUNCTION public.how_many_times_win(player_identity int)
+RETURNS int
+LANGUAGE 'plpgsql'
+AS $BODY$
+declare wins int;
+ begin
+ select COUNT(*) into wins
+ from matches_history
+ where ((matches_history.first_player_id=player_identity and matches_history.first_player_score = 3)
+		or (matches_history.second_player_id=player_identity and matches_history.second_player_score = 3));
+ return wins;
+		end;
+ $BODY$;
+
+
+
+CREATE OR REPLACE FUNCTION public.number_of_players_from_same_country()
+RETURNS table(country varchar(50), number_of_players bigint)
+LANGUAGE 'plpgsql'
+AS $BODY$
+begin
+return query
+SELECT
+players.country,
+COUNT(*) 
+from players
+group by players.country;
+end;
+$BODY$;
+
+create or replace function public.score_calc()
+returns int
+language plpgsql as $BODY$
+declare first_id int;
+declare second_id int;
+declare first_words varchar(30)[10];
+declare second_words varchar(30)[10];
+declare first_correct_words int;
+declare second_correct_words int;
+declare i int;
+declare j int;
+declare correct_words varchar(30)[10];
+begin
+first_correct_words=0;
+second_correct_words=0;
+select matches.first_player_id into first_id from matches;
+select matches.second_player_id into second_id from matches;
+select matches.first_player_words into first_words from matches;
+select matches.second_player_words into second_words from matches;
+select words.word into correct_words
+from words;
+FOR i IN 1..10 LOOP
+    if(first_words[i] = correct_words[i]) then 
+	first_correct_words=first_correct_words+1;
+	end if;
+	if(second_words[i] = correct_words[i]) then 
+	second_correct_words=second_correct_words+1;
+	end if;
+END LOOP;
+if(first_correct_words > second_correct_words) then
+	update players
+	set score=score+3
+	where players.player_id = first_id;
+	return 1;
+elsif(first_correct_words < second_correct_words) then
+	update players
+	set score=score+3
+	where players.player_id = second_id;
+	return 2;
+else
+	update players
+	set score=score+1
+	where players.player_id = first_id OR players.player_id = second_id;
+	return 3;
+end if;
+end;
+$BODY$;
+
+--create triggers
+CREATE OR REPLACE FUNCTION public.game_ended()
+RETURNS trigger
+ LANGUAGE 'plpgsql'
+ AS $BODY$
+ declare first_word10 varchar(30);
+ declare second_word10 varchar(30);
+ declare score_state int;
+ declare score_arr integer array[2];
+ declare first_id int;
+ declare second_id int;
+ BEGIN
+ select first_player_words[10] into first_word10 from matches;
+ select second_player_words[10] into second_word10 from matches;
+ select first_player_id into first_id from matches;
+ select second_player_id into second_id from matches;
+  if(first_word10 IS NOT NULL and second_word10 IS NOT NULL) then
+ 	select * into score_state from public.score_calc();
+	if(score_state=1) then
+		score_arr[0]=3;
+		score_arr[1]=0;
+	elsif(score_state=2) then
+		score_arr[0]=0;
+		score_arr[1]=3;
+	else
+		score_arr[0]=1;
+		score_arr[1]=1;
+	end if;
+	INSERT INTO matches_history values(first_id, second_id, now(), score_arr[0], score_arr[1]);
+	call public.reset_matches();
+	grant update(first_player_id,second_player_id) on matches to public;
+end if;
+ RETURN NEW;
+ END;
+ $BODY$
+ security definer;
+CREATE TRIGGER game_ended_trigger
+ AFTER update
+ ON matches
+ FOR EACH ROW
+ EXECUTE PROCEDURE public.game_ended();
+
+CREATE OR REPLACE FUNCTION public.set_rolname()
+RETURNS trigger
+ LANGUAGE 'plpgsql'
+ AS $BODY$
+ BEGIN
+ NEW.role_name = current_role;
+ RETURN NEW;
+ END;
+ $BODY$;
+CREATE TRIGGER role_name_setter
+ BEFORE insert
+ ON players
+ FOR EACH ROW
+ EXECUTE PROCEDURE public.set_rolname();
+
+
+
+
+CREATE OR REPLACE FUNCTION public.check_matches_first_player_validity()
+RETURNS trigger
+ LANGUAGE 'plpgsql'
+ AS $BODY$
+ declare player_id_in_players int;
+ BEGIN
+ select players.player_id into player_id_in_players
+ from players
+ where role_name = current_user;
+ if((NEW.first_player_id=player_id_in_players) and (NEW.first_player_id != NEW.second_player_id)) then
+		call grant_update_to_user1(current_user);
+		revoke update(second_player_id) from current_user;
+ 		return NEW;
+ else
+ RAISE NOTICE 'DO NOT CHEAT!!!';
+ return OLD;
+end if;
+ END;
+ $BODY$;
+CREATE  TRIGGER check_matches_first_player_validity_trigger
+ before update OF first_player_id
+ ON matches
+ FOR EACH ROW
+ EXECUTE PROCEDURE public.check_matches_first_player_validity();
+
+CREATE OR REPLACE FUNCTION public.check_matches_second_player_validity()
+RETURNS trigger
+ LANGUAGE 'plpgsql'
+ AS $BODY$
+ declare player_id_in_players int;
+ BEGIN
+ select players.player_id into player_id_in_players
+ from players
+ where role_name = current_user;
+ if((NEW.second_player_id=player_id_in_players) and (NEW.first_player_id != NEW.second_player_id)) then
+		call grant_update_to_user2(current_user);
+		revoke update(first_player_id) from current_user;
+ 		return NEW;
+ else
+ RAISE NOTICE 'DO NOT CHEAT!!!';
+ return OLD;
+end if;
+ END;
+ $BODY$;
+CREATE  TRIGGER check_matches_second_player_validity_trigger
+ BEFORE update OF second_player_id
+ ON matches
+ FOR EACH ROW
+ EXECUTE PROCEDURE public.check_matches_second_player_validity();
+
+CREATE OR REPLACE FUNCTION public.revoke_from_first_player_end_of_game()
+RETURNS trigger
+ LANGUAGE 'plpgsql'
+ AS $BODY$
+declare first_word10 varchar(30);
+ BEGIN
+select first_player_words[10] into first_word10 from matches;
+ if(first_word10 IS NOT NULL) then
+	call revoke_update_from_user1(current_user);
+	end if;
+ RETURN NEW;
+ END;
+ $BODY$;
+CREATE TRIGGER revoke_from_first_player_end_of_game_trigger
+ AFTER update of first_player_words
+ ON matches
+ FOR EACH ROW
+ EXECUTE PROCEDURE public.revoke_from_first_player_end_of_game();
+
+CREATE OR REPLACE FUNCTION public.revoke_from_second_player_end_of_game()
+RETURNS trigger
+ LANGUAGE 'plpgsql'
+ AS $BODY$
+ declare second_word10 varchar(30);
+
+ BEGIN
+ select second_player_words[10] into second_word10 from matches;
+
+ if(second_word10 IS NOT NULL) then
+	call revoke_update_from_user2(current_user);
+	end if;
+ RETURN NEW;
+ END;
+ $BODY$;
+CREATE TRIGGER revoke_from_second_player_end_of_game_trigger
+ AFTER update of second_player_words
+ ON matches
+ FOR EACH ROW
+ EXECUTE PROCEDURE public.revoke_from_second_player_end_of_game();
+
+CREATE OR REPLACE FUNCTION public.bycotted_countries_check()
+RETURNS trigger
+ LANGUAGE 'plpgsql'
+ AS $BODY$
+ BEGIN
+ if(NEW.country IN (select country_name from bycotted_countries)) then
+	RAISE NOTICE 'Sorry you are bycotted :((';
+	return old;
+ end if;
+ RETURN NEW;
+ END;
+ $BODY$;
+ CREATE TRIGGER bycotted_countries_check_trigger
+ BEFORE insert
+ ON players
+ FOR EACH ROW
+ EXECUTE PROCEDURE public.bycotted_countries_check();
+
+--grants
+grant insert(first_name, last_name, continent, country, city, phone)
+on players
+to public;
+grant select(player_id)
+on players
+to public;
+
+grant usage
+on players_player_id_seq
+to public;
+
+grant select on bycotted_countries to public;
+
+grant select
+on words
+to public;
+
+grant select
+on matches_history
+to public;
+--------------------------------------
+call reset_matches();
+create role arman
+login
+password 'arman';
+create role hasan
+login
+password 'hasan';
+
+call words_init();
